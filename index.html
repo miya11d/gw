@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+<title>Arena Pahlawan — Mini MOBA Lite</title>
+<style>
+  :root{--bg:#0b1220;--panel:#08303a;--accent:#5FE0A8;--danger:#FF6B6B;--muted:#9fb3b8}
+  html,body{height:100%;margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,Arial;color:#eaf6f0}
+  body{display:flex;align-items:center;justify-content:center;background:linear-gradient(180deg,#071826 0%, #081a26 100%)}
+  .wrap{width:100%;max-width:900px;height:92vh;background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));border-radius:14px;box-shadow:0 12px 40px rgba(2,6,23,0.6);position:relative;overflow:hidden}
+  canvas{width:100%;height:100%;display:block}
+  /* HUD */
+  .hud{position:absolute;left:12px;top:12px;z-index:30;display:flex;gap:8px;align-items:center}
+  .badge{background:rgba(0,0,0,0.35);padding:8px 10px;border-radius:10px;font-weight:700}
+  .controls{position:absolute;right:12px;bottom:12px;z-index:40;display:flex;gap:12px}
+  .ability{background:linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.01));border-radius:12px;padding:12px 14px;font-weight:800;border:2px solid rgba(255,255,255,0.03);min-width:62px;text-align:center;touch-action:none}
+  .ability.cool{opacity:0.4}
+  .joystick{position:absolute;left:12px;bottom:12px;width:140px;height:140px;border-radius:50%;background:rgba(255,255,255,0.02);display:flex;align-items:center;justify-content:center;z-index:40}
+  .stick{width:54px;height:54px;border-radius:50%;background:rgba(95,224,168,0.18);display:block;transform:translate(0,0)}
+  .centerMsg{position:absolute;left:50%;top:12px;transform:translateX(-50%);z-index:40;font-weight:800;background:rgba(0,0,0,0.35);padding:8px 12px;border-radius:999px}
+  .mini-map{position:absolute;right:12px;top:12px;width:120px;height:120px;background:rgba(0,0,0,0.28);border-radius:8px;padding:6px;z-index:35}
+  .footer{position:absolute;left:12px;bottom:12px;font-size:12px;color:var(--muted);z-index:20}
+  /* small responsive tweaks */
+  @media (max-width:480px){ .wrap{max-width:420px} }
+</style>
+</head>
+<body>
+  <div class="wrap" id="wrap">
+    <canvas id="c"></canvas>
+    <div class="hud"><div class="badge" id="hp">HP: 100/100</div><div class="badge" id="mana">Mana: 100</div><div class="badge" id="score">Score: 0</div></div>
+    <div class="centerMsg" id="centerMsg">Arena Pahlawan — Sentuh untuk mulai</div>
+    <div class="mini-map" id="miniMap">MAP</div>
+    <div class="joystick" id="joy"><div class="stick" id="stick"></div></div>
+    <div class="controls">
+      <div class="ability" id="a1">Skill A</div>
+      <div class="ability" id="a2">Skill B</div>
+      <div class="ability" id="a3">Ultimate</div>
+    </div>
+    <div class="footer">Kontrol: Joystick kiri untuk bergerak • Ketuk ability untuk pakai</div>
+  </div>
+<script>
+/* Arena Pahlawan — Mini MOBA Lite
+ - Single-file HTML (Canvas) mobile-first
+ - Top-down 1v1 AI + minions + towers (simplified)
+ - Touch controls: left virtual joystick, right abilities (tap)
+ - Unique tweaks: energy shield, dash, skill combos
+
+ Notes: This is a lightweight prototype — to turn into a full game add assets, server multiplayer, and polish.
+*/
+
+const canvas = document.getElementById('c'); const ctx = canvas.getContext('2d'); const wrap = document.getElementById('wrap');
+let W, H, DPR = window.devicePixelRatio || 1;
+function resize(){ W = wrap.clientWidth; H = wrap.clientHeight; canvas.style.width = W+'px'; canvas.style.height = H+'px'; canvas.width = Math.round(W*DPR); canvas.height = Math.round(H*DPR); ctx.setTransform(DPR,0,0,DPR,0,0); }
+window.addEventListener('resize', resize); resize();
+
+// utilities
+const rand = (a,b) => Math.random()*(b-a)+a;
+const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
+const dist = (a,b) => Math.hypot(a.x-b.x, a.y-b.y);
+
+// game state
+const state = { running:true, started:false, time:0, score:0, entities:[], projectiles:[], minions:[], towers:[], effects:[] };
+
+// player class
+class Hero{
+  constructor(opts){
+    this.id = opts.id || 'player';
+    this.x = opts.x; this.y = opts.y; this.r = 18; this.color = opts.color || '#5FE0A8';
+    this.hp = 100; this.maxHp = 100; this.mana = 100; this.maxMana = 100; this.speed = 160; this.vx=0; this.vy=0; this.team = opts.team || 0; this.level=1; this.kills=0; this.cooldowns = {a1:0,a2:0,ult:0};
+    this.shield = 0; // temporary shield
+    this.alive = true;
+  }
+  update(dt){
+    if(!this.alive) return;
+    // apply velocity
+    this.x += this.vx*dt; this.y += this.vy*dt;
+    // simple world bounds
+    this.x = clamp(this.x, 20, W-20); this.y = clamp(this.y, 20, H-20);
+    // regen mana
+    this.mana = clamp(this.mana + 12*dt, 0, this.maxMana);
+    // cooldowns
+    for(const k in this.cooldowns) if(this.cooldowns[k] > 0) this.cooldowns[k] = Math.max(0, this.cooldowns[k] - dt);
+    // dead
+    if(this.hp <= 0){ this.alive = false; spawnRespawnEffect(this.x,this.y); setTimeout(()=>this.respawn(), 2500); }
+  }
+  takeDamage(d){ if(this.shield>0){ const s = Math.min(this.shield, d); this.shield -= s; d -= s; } this.hp -= d; }
+  respawn(){ this.alive = true; this.hp = this.maxHp; this.mana = this.maxMana*0.6; this.x = this.team===0 ? W*0.25 : W*0.75; this.y = H*0.5; }
+  draw(){ if(!this.alive) { ctx.globalAlpha=0.4; }
+    // body
+    ctx.beginPath(); ctx.fillStyle = this.color; ctx.arc(this.x,this.y,this.r,0,Math.PI*2); ctx.fill();
+    // shield ring
+    if(this.shield>0){ ctx.lineWidth=4; ctx.strokeStyle='rgba(95,224,168,0.28)'; ctx.beginPath(); ctx.arc(this.x,this.y,this.r+8,0,Math.PI*2); ctx.stroke(); }
+    // hp bar
+    ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(this.x-28, this.y-32, 56,8);
+    ctx.fillStyle = '#4EE2C7'; ctx.fillRect(this.x-28, this.y-32, 56*(this.hp/this.maxHp),8);
+    // name
+    ctx.fillStyle = '#eaf6f0'; ctx.font = '11px sans-serif'; ctx.textAlign='center'; ctx.fillText(this.id, this.x, this.y+36);
+    ctx.globalAlpha=1;
+  }
+}
+
+// basic AI enemy hero (solo)
+class AIHero extends Hero{
+  constructor(opts){ super(opts); this.target = null; this.behaviorTimer = 0; }
+  update(dt){ super.update(dt); if(!this.alive) return; this.behaviorTimer -= dt; if(this.behaviorTimer<=0){ this.behaviorTimer = rand(0.6,1.2); // pick action
+    // choose nearest enemy
+    const enemies = state.entities.filter(e=>e.team!==this.team && e.alive);
+    if(enemies.length) this.target = enemies.reduce((a,b)=> dist(a,b) < dist(b,a) ? a : b);
+    else this.target = null;
+  }
+    // simple chase
+    if(this.target){ const angle = Math.atan2(this.target.y - this.y, this.target.x - this.x); this.vx = Math.cos(angle)*this.speed*0.9; this.vy = Math.sin(angle)*this.speed*0.9;
+      // attack range
+      if(dist(this,this.target) < 110 && this.cooldowns.a1<=0){ this.castA1(); }
+    } else { this.vx *= 0.9; this.vy *= 0.9; }
+  }
+  castA1(){ // basic projectile
+    if(this.mana < 10) return; this.mana -= 10; this.cooldowns.a1 = 1.1;
+    const angle = Math.atan2((player.y - this.y), (player.x - this.x));
+    spawnProjectile(this.x, this.y, angle, 420, 12, this, '#FFCE66');
+  }
+}
+
+// projectiles
+function spawnProjectile(x,y,angle,speed, dmg, owner, color='#FFD6A6'){
+  state.projectiles.push({x,y,angle,speed,dmg,owner,color,ttl:4});
+}
+
+// minion spawn
+function spawnMinion(team,x,y){ state.minions.push({x,y,team,hp:30,maxHp:30,r:10,vx:team===0?40:-40}); }
+
+// towers
+function spawnTower(team,x,y){ state.towers.push({team,x,y,hp:250,r:26}); }
+
+// effects
+function spawnRespawnEffect(x,y){ state.effects.push({x,y,t:0,type:'respawn'}); }
+
+// setup entities
+const player = new Hero({id:'Kamu', x: W*0.25, y: H*0.5, color:'#5FE0A8', team:0});
+const enemy = new AIHero({id:'Bot', x: W*0.75, y: H*0.5, color:'#FF8E8E', team:1});
+state.entities.push(player); state.entities.push(enemy);
+// towers
+spawnTower(0, 70, H*0.5); spawnTower(1, W-70, H*0.5);
+// spawn some minions initially
+for(let i=0;i<3;i++){ spawnMinion(0, 140 - i*30, H*0.5 + (i-1)*18); spawnMinion(1, W-140 + i*30, H*0.5 + (i-1)*18); }
+
+// input: virtual joystick (left)
+const joy = document.getElementById('joy'); const stick = document.getElementById('stick');
+let joyCenter = null; let activeTouchId = null; let moveDir = {x:0,y:0}; function layoutJoy(){ const rect = joy.getBoundingClientRect(); joyCenter = {x:rect.left+rect.width/2, y:rect.top+rect.height/2, w:rect.width}; }
+layoutJoy(); window.addEventListener('resize', layoutJoy);
+
+joy.addEventListener('touchstart', e=>{ e.preventDefault(); const t = e.changedTouches[0]; activeTouchId = t.identifier; handleStickMove(t.clientX, t.clientY); });
+joy.addEventListener('touchmove', e=>{ e.preventDefault(); for(const t of e.changedTouches) if(t.identifier===activeTouchId) handleStickMove(t.clientX, t.clientY); });
+joy.addEventListener('touchend', e=>{ e.preventDefault(); for(const t of e.changedTouches) if(t.identifier===activeTouchId){ activeTouchId=null; moveDir={x:0,y:0}; stick.style.transform='translate(0,0)'; } });
+
+function handleStickMove(cx,cy){ const rect = wrap.getBoundingClientRect(); const x = cx - rect.left; const y = cy - rect.top; const dx = x - (joy.offsetLeft + joy.clientWidth/2); const dy = y - (joy.offsetTop + joy.clientHeight/2); const max = 42; const len = Math.hypot(dx,dy); const nx = len ? dx/len : 0; const ny = len ? dy/len : 0; const mag = Math.min(len, max)/max; moveDir = {x:nx*mag, y:ny*mag}; stick.style.transform = `translate(${nx*mag*40}px, ${ny*mag*40}px)`; }
+
+// abilities
+const a1 = document.getElementById('a1'); const a2 = document.getElementById('a2'); const a3 = document.getElementById('a3');
+a1.addEventListener('touchstart', e=>{ e.preventDefault(); tryCast('a1'); });
+a2.addEventListener('touchstart', e=>{ e.preventDefault(); tryCast('a2'); });
+a3.addEventListener('touchstart', e=>{ e.preventDefault(); tryCast('ult'); });
+
+function tryCast(name){ if(!player.alive) return; if(player.cooldowns[name] > 0) return; if(name==='a1' && player.mana>=8){ // shoot projectile
+  player.mana -= 8; player.cooldowns.a1 = 0.9; const angle = Math.atan2(enemy.y - player.y, enemy.x - player.x); spawnProjectile(player.x, player.y, angle, 540, 16, player, '#A6FFD9'); }
+  else if(name==='a2' && player.mana>=18){ player.mana -= 18; player.cooldowns.a2 = 4.0; player.shield = 30; state.effects.push({x:player.x,y:player.y,t:0,type:'shield'}); }
+  else if(name==='ult' && player.mana>=40){ player.mana -= 40; player.cooldowns.ult = 12.0; // dash + big projectile radial
+    // dash forward
+    const dx = moveDir.x || (enemy.x>player.x?1:-1); const dy = moveDir.y || 0; player.vx += dx*720; player.vy += dy*720;
+    for(let i=0;i<6;i++){ const ang = (i/6)*Math.PI*2; spawnProjectile(player.x, player.y, ang, 360, 14, player, '#FFD6A6'); }
+  }
+}
+
+// collide helper
+function circleVsCircle(a,b){ return Math.hypot(a.x-b.x, a.y-b.y) < (a.r || 0) + (b.r || 0); }
+
+// main loop
+let last = performance.now(); function loop(now){ if(!state.running) return; const dt = Math.min(0.033, (now - last)/1000); last = now; state.time += dt;
+  // start after first touch
+  if(!state.started){ requestAnimationFrame(loop); return; }
+  // player movement from joystick
+  player.vx = moveDir.x * player.speed; player.vy = moveDir.y * player.speed;
+  // update all
+  for(const e of state.entities) e.update(dt);
+  for(const m of state.minions){ m.x += m.vx*dt; // simple targeting towers
+    // attack enemy minions or heroes
+    // die
+    if(m.hp<=0){ state.minions.splice(state.minions.indexOf(m),1); }
+  }
+  // projectiles
+  for(let i=state.projectiles.length-1;i>=0;i--){ const p = state.projectiles[i]; p.x += Math.cos(p.angle)*p.speed*dt; p.y += Math.sin(p.angle)*p.speed*dt; p.ttl -= dt; if(p.ttl<=0){ state.projectiles.splice(i,1); continue; }
+    // collision with heroes
+    for(const e of state.entities){ if(e.alive && e !== p.owner && Math.hypot(e.x-p.x,e.y-p.y) < e.r+6){ e.takeDamage(p.dmg); // owner score
+          if(p.owner.team !== e.team && e.hp<=0){ p.owner.kills++; if(p.owner === player) state.score += 10; }
+          state.projectiles.splice(i,1); break; } }
+  }
+  // towers simple behavior: shoot at nearest enemy in range
+  for(const t of state.towers){ // find enemies
+    const enemiesInRange = state.entities.filter(e => e.team !== t.team && e.alive && Math.hypot(e.x - t.x, e.y - t.y) < 220);
+    if(enemiesInRange.length && Math.random() < 0.02){ const target = enemiesInRange[0]; const ang = Math.atan2(target.y-t.y, target.x-t.x); spawnProjectile(t.x,t.y,ang,380,18,{team:t.team, id:'tower'}, '#FFB3B3'); }
+  }
+
+  // update effects
+  for(const fx of state.effects){ fx.t += dt; }
+  state.effects = state.effects.filter(f => f.t < 1.6);
+
+  // draw
+  drawScene();
+  // HUD
+  document.getElementById('hp').innerText = `HP: ${Math.max(0,Math.round(player.hp))}/${player.maxHp}`;
+  document.getElementById('mana').innerText = `Mana: ${Math.round(player.mana)}`;
+  document.getElementById('score').innerText = `Score: ${state.score}`;
+  // ability cooldown visual
+  a1.classList.toggle('cool', player.cooldowns.a1>0); a2.classList.toggle('cool', player.cooldowns.a2>0); a3.classList.toggle('cool', player.cooldowns.ult>0);
+
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+function drawScene(){ // clear
+  ctx.fillStyle = '#072233'; ctx.fillRect(0,0,W,H);
+  // draw lanes / grass
+  ctx.fillStyle = '#083645'; ctx.fillRect(0, H*0.2, W, H*0.6);
+  // draw central river
+  ctx.fillStyle = '#053449'; ctx.fillRect(W*0.18, H*0.38, W*0.64, H*0.24);
+  // draw towers
+  for(const t of state.towers){ ctx.beginPath(); ctx.fillStyle = t.team===0? '#5FE0A8' : '#FF8E8E'; ctx.arc(t.x,t.y,t.r,0,Math.PI*2); ctx.fill(); ctx.fillStyle='rgba(0,0,0,0.5)'; ctx.fillRect(t.x-28,t.y+30,56,8); ctx.fillStyle='#fff'; ctx.fillRect(t.x-28,t.y+30,56*(t.hp/250),8); }
+  // draw minions
+  for(const m of state.minions){ ctx.beginPath(); ctx.fillStyle = m.team===0? '#CFFFE6' : '#FFD6D6'; ctx.arc(m.x,m.y,m.r,0,Math.PI*2); ctx.fill(); ctx.fillStyle='rgba(0,0,0,0.3)'; ctx.fillRect(m.x-14,m.y+12,28,5); ctx.fillStyle='#fff'; ctx.fillRect(m.x-14,m.y+12,28*(m.hp/m.maxHp),5); }
+  // draw entities
+  for(const e of state.entities) e.draw();
+  // draw projectiles
+  for(const p of state.projectiles){ ctx.beginPath(); ctx.fillStyle = p.color || '#FFF'; ctx.arc(p.x,p.y,6,0,Math.PI*2); ctx.fill(); }
+  // effects
+  for(const fx of state.effects){ if(fx.type==='respawn'){ ctx.beginPath(); ctx.strokeStyle = `rgba(255,255,255,${1-fx.t})`; ctx.arc(fx.x,fx.y,fx.t*26,0,Math.PI*2); ctx.stroke(); } if(fx.type==='shield'){ ctx.beginPath(); ctx.strokeStyle='rgba(95,224,168,0.18)'; ctx.arc(player.x,player.y, player.r+8 + fx.t*4,0,Math.PI*2); ctx.stroke(); } }
+  // mini-map (very simplified)
+  drawMiniMap();
+}
+
+function drawMiniMap(){ const mm = document.getElementById('miniMap'); const ctxm = mm.getContext && mm.getContext('2d'); // fallback draw simple boxes
+  mm.innerHTML = '';
+  const mk = document.createElement('div'); mk.style.width='100%'; mk.style.height='100%'; mk.style.position='relative'; mk.style.fontSize='11px'; mk.style.color='#dff7ec'; mk.innerHTML = `<div style="position:absolute;left:6px;top:6px">Kamu</div><div style="position:absolute;right:6px;top:6px">Bot</div>`; mm.appendChild(mk);
+}
+
+// start on first touch anywhere in wrap
+wrap.addEventListener('touchstart', e=>{ if(!state.started){ state.started = true; document.getElementById('centerMsg').style.display='none'; } });
+
+// simple loop to spawn minions periodically
+setInterval(()=>{ spawnMinion(0, 140, H*0.45); spawnMinion(1, W-140, H*0.55); }, 5200);
+
+// simple cleanup / world rules
+setInterval(()=>{
+  // minion AI: move to enemy side
+  for(const m of state.minions){ if(m.team===0) m.vx = 60; else m.vx = -60; // check collision with towers/enemies
+    for(const t of state.towers){ if(Math.hypot(m.x - t.x, m.y - t.y) < 40 && t.team !== m.team){ t.hp -= 6; m.hp = 0; if(t.hp<=0){ t.hp = 0; } } }
+    for(const e of state.entities){ if(e.team !== m.team && e.alive && Math.hypot(m.x-e.x,m.y-e.y)<e.r+8){ e.takeDamage(8); m.hp = 0; } }
+  }
+  // remove dead towers? not in this prototype
+}, 600);
+
+// allow mouse for testing on desktop
+window.addEventListener('keydown', e=>{ if(e.key===' ') tryCast('a1'); if(e.key==='q') tryCast('a2'); if(e.key==='e') tryCast('ult'); });
+
+</script>
+</body>
+</html>
